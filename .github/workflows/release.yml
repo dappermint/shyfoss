@@ -1,0 +1,17 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+      - run: ditto -c -k --keepParent build/ShyFoss.app ShyFoss-${{ github.ref_name }}.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ShyFoss-${{ github.ref_name }}.zip
+          generate_release_notes: true
