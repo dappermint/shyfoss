@@ -58,11 +58,33 @@ final class Overlay: NSWindow {
 // top-down view of the zones: clear disc = comfort, ring = fade, outside = shielded. dot = where you look now
 final class ZoneView: NSView {
     var head = SIMD2<Double>.zero { didSet { needsDisplay = true } }
+    var onChange: (() -> Void)?
     let maxDeg = 75.0
+    var dragging: Int?
     override var intrinsicContentSize: NSSize { NSSize(width: 200, height: 200) }
+    var c: NSPoint { NSPoint(x: bounds.midX, y: bounds.midY) }
+    var scale: Double { (bounds.width / 2 - 4) / maxDeg }
+    func deg(_ p: NSPoint) -> SIMD2<Double> { SIMD2((p.x - c.x) / scale, (p.y - c.y) / scale) }
+
+    // click empty space = add a screen there, drag a screen = move it, main center is fixed
+    override func acceptsFirstMouse(for e: NSEvent?) -> Bool { true }
+    override func mouseDown(with e: NSEvent) {
+        let at = deg(convert(e.locationInWindow, from: nil))
+        let (i, _) = nearest(at)
+        if i > 0, simd_length(at - screens[i - 1]) < comfortDeg { dragging = i - 1; return }
+        guard i == 0 && simd_length(at) < comfortDeg || simd_length(at) > maxDeg else { screens.append(at); dragging = screens.count - 1; onChange?(); return }
+    }
+    override func mouseDragged(with e: NSEvent) {
+        guard let d = dragging else { return }
+        var at = deg(convert(e.locationInWindow, from: nil))
+        if simd_length(at) > maxDeg { at = simd_normalize(at) * maxDeg }
+        var s = screens; s[d] = at; screens = s
+        onChange?()
+    }
+    override func mouseUp(with e: NSEvent) { dragging = nil }
+
     override func draw(_ r: NSRect) {
-        let c = NSPoint(x: bounds.midX, y: bounds.midY)
-        let scale = (bounds.width / 2 - 4) / maxDeg
+        let c = self.c, scale = self.scale
         let ring = { (deg: Double, at: SIMD2<Double>) in NSBezierPath(ovalIn: NSRect(x: c.x + at.x * scale - deg * scale, y: c.y + at.y * scale - deg * scale, width: 2 * deg * scale, height: 2 * deg * scale)) }
         NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).addClip()
         NSColor.controlAccentColor.withAlphaComponent(0.25).setFill(); ring(maxDeg, .zero).fill()
@@ -70,6 +92,14 @@ final class ZoneView: NSView {
         NSColor.controlAccentColor.withAlphaComponent(0.12).setFill(); centers.forEach { ring(comfortDeg + transitionDeg, $0).fill() }
         NSColor.windowBackgroundColor.setFill(); centers.forEach { ring(comfortDeg, $0).fill() }
         NSColor.controlAccentColor.setStroke(); centers.forEach { ring(comfortDeg, $0).stroke() }
+        let active = nearest(head).0
+        if simd_length(nearest(head).1) < comfortDeg { NSColor.controlAccentColor.withAlphaComponent(0.15).setFill(); ring(comfortDeg, centers[active]).fill() }
+        for (i, s) in screens.enumerated() {
+            let n = "\(i + 1)" as NSString
+            let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.systemFont(ofSize: 10, weight: .semibold)]
+            let sz = n.size(withAttributes: attrs)
+            n.draw(at: NSPoint(x: c.x + s.x * scale - sz.width / 2, y: c.y + s.y * scale - sz.height / 2), withAttributes: attrs)
+        }
         NSColor.controlAccentColor.withAlphaComponent(0.4).setStroke(); centers.forEach { ring(comfortDeg + transitionDeg, $0).stroke() }
         let h = simd_length(head) > maxDeg ? simd_normalize(head) * maxDeg : head
         let p = NSPoint(x: c.x + h.x * scale, y: c.y + h.y * scale)
@@ -99,7 +129,11 @@ final class SettingsWindow: NSWindow {
         screenList.alignment = .leading
         reloadScreens()
         let add = NSButton(title: "add a screen where i'm looking now", target: self, action: #selector(addScreen))
-        let stack = NSStackView(views: [zone, grid, screenList, add])
+        let hint = NSTextField(labelWithString: "or click the map to place one, drag to move")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        zone.onChange = { [unowned self] in reloadScreens() }
+        let stack = NSStackView(views: [zone, grid, screenList, add, hint])
         stack.orientation = .vertical
         stack.spacing = 20
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -132,6 +166,7 @@ final class SettingsWindow: NSWindow {
         for (i, s) in screens.enumerated() {
             let dir = abs(s.x) > abs(s.y) ? (s.x > 0 ? "right" : "left") : (s.y > 0 ? "up" : "down")
             let label = NSTextField(labelWithString: String(format: "screen %d: %.0f° %@", i + 1, simd_length(s), dir))
+            label.widthAnchor.constraint(equalToConstant: 150).isActive = true
             let rm = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "remove")!, target: self, action: #selector(removeScreen(_:)))
             rm.isBordered = false
             rm.tag = i
