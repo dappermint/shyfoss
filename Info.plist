@@ -6,8 +6,8 @@
   <key>CFBundleIdentifier</key><string>lgbt.dappy.shyfoss</string>
   <key>CFBundleExecutable</key><string>ShyFoss</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSMotionUsageDescription</key><string>reads AirPods head motion to blur the screen when you look away</string>
