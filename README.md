@@ -11,9 +11,9 @@ or `make run`. macOS 14+, one swift file, no dependencies
 1. first launch asks you to look at the screen center and calibrate
 2. turn further than the comfort zone (default 15°) and the screen fades to blur over the next 18°
 3. look back and it clears. esc clears it too until you return to center
-4. settings… in the menu bar: comfort zone, fade distance, blur strength
+4. settings… in the menu bar: a top-down map of the zones with your head as a dot, plus comfort zone, fade distance, blur strength
 5. ⌃⌥⌘R recenters, ⌃⌥⌘S toggles the shield (for screen sharing). launch at login lives in the menu
-6. second monitor: look at it and pick "add another screen here", both count as center
+6. second monitor: look at it and pick "add a screen here" (menu or settings). extra screens show on the map and survive relaunch; the x next to each removes it
 
 yaw drifts a little since airpods have no compass; the center follows you slowly while you're looking at the screen. take the airpods off and the shield clears within a second
 

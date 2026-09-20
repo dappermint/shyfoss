@@ -5,10 +5,19 @@ import Carbon.HIToolbox
 import ServiceManagement
 
 let defaults = UserDefaults.standard
-let prefs = NSUserDefaultsController.shared
 var comfortDeg: Double { defaults.double(forKey: "comfort") }
 var transitionDeg: Double { defaults.double(forKey: "transition") }
 var strength: Double { defaults.double(forKey: "strength") }
+// extra monitors as offsets from the main center, degrees. ponytail: flat 2d distance, fine below ~60°
+var screens: [SIMD2<Double>] {
+    get { (defaults.array(forKey: "screens") as? [[Double]] ?? []).map { SIMD2($0[0], $0[1]) } }
+    set { defaults.set(newValue.map { [$0.x, $0.y] }, forKey: "screens") }
+}
+
+// nearest center: 0 = main, 1... = screens. returns index and offset from that center
+func nearest(_ off: SIMD2<Double>) -> (Int, SIMD2<Double>) {
+    ([SIMD2<Double>.zero] + screens).enumerated().map { ($0, off - $1) }.min { simd_length($0.1) < simd_length($1.1) }!
+}
 
 // ponytail: alpha ramp only, no directional gradient. add CAGradientLayer angled by yaw/pitch if wanted
 func coverage(_ dev: Double, comfort: Double, transition: Double) -> Double {
@@ -17,11 +26,15 @@ func coverage(_ dev: Double, comfort: Double, transition: Double) -> Double {
 
 func quat(_ q: CMQuaternion) -> simd_quatd { simd_quatd(ix: q.x, iy: q.y, iz: q.z, r: q.w) }
 
-// angle between where the face points now and at calibration; y is forward so head roll is ignored
-func deviation(_ ref: simd_quatd, _ cur: simd_quatd) -> Double {
+// where the face points relative to calibration, as a 2d offset in degrees (x right, y up); roll is ignored
+func offset(_ ref: simd_quatd, _ cur: simd_quatd) -> SIMD2<Double> {
     let fwd = (ref.inverse * cur).act(SIMD3(0, 1, 0))
-    return acos(min(1, max(-1, fwd.y))) * 180 / .pi
+    let ang = acos(min(1, max(-1, fwd.y))) * 180 / .pi
+    let dir = SIMD2(fwd.x, fwd.z)
+    return simd_length(dir) < 1e-9 ? .zero : simd_normalize(dir) * ang
 }
+
+func deviation(_ ref: simd_quatd, _ cur: simd_quatd) -> Double { simd_length(offset(ref, cur)) }
 
 final class Overlay: NSWindow {
     var onEscape: (() -> Void)?
@@ -42,40 +55,99 @@ final class Overlay: NSWindow {
     override func keyDown(with e: NSEvent) { if e.keyCode == 53 { onEscape?() } else { super.keyDown(with: e) } }
 }
 
+// top-down view of the zones: clear disc = comfort, ring = fade, outside = shielded. dot = where you look now
+final class ZoneView: NSView {
+    var head = SIMD2<Double>.zero { didSet { needsDisplay = true } }
+    let maxDeg = 75.0
+    override var intrinsicContentSize: NSSize { NSSize(width: 200, height: 200) }
+    override func draw(_ r: NSRect) {
+        let c = NSPoint(x: bounds.midX, y: bounds.midY)
+        let scale = (bounds.width / 2 - 4) / maxDeg
+        let ring = { (deg: Double, at: SIMD2<Double>) in NSBezierPath(ovalIn: NSRect(x: c.x + at.x * scale - deg * scale, y: c.y + at.y * scale - deg * scale, width: 2 * deg * scale, height: 2 * deg * scale)) }
+        NSBezierPath(ovalIn: bounds.insetBy(dx: 4, dy: 4)).addClip()
+        NSColor.controlAccentColor.withAlphaComponent(0.25).setFill(); ring(maxDeg, .zero).fill()
+        let centers = [SIMD2<Double>.zero] + screens
+        NSColor.controlAccentColor.withAlphaComponent(0.12).setFill(); centers.forEach { ring(comfortDeg + transitionDeg, $0).fill() }
+        NSColor.windowBackgroundColor.setFill(); centers.forEach { ring(comfortDeg, $0).fill() }
+        NSColor.controlAccentColor.setStroke(); centers.forEach { ring(comfortDeg, $0).stroke() }
+        NSColor.controlAccentColor.withAlphaComponent(0.4).setStroke(); centers.forEach { ring(comfortDeg + transitionDeg, $0).stroke() }
+        let h = simd_length(head) > maxDeg ? simd_normalize(head) * maxDeg : head
+        let p = NSPoint(x: c.x + h.x * scale, y: c.y + h.y * scale)
+        NSColor.labelColor.setFill(); NSBezierPath(ovalIn: NSRect(x: p.x - 5, y: p.y - 5, width: 10, height: 10)).fill()
+    }
+}
+
 final class SettingsWindow: NSWindow {
+    let zone = ZoneView()
+    let screenList = NSStackView()
+    var labels: [String: NSTextField] = [:]
+    var onAddScreen: (() -> Void)?
+    let specs: [(String, String, Double, Double, Int, String)] = [
+        ("comfort zone", "comfort", 2, 30, 0, "°"),
+        ("fade distance", "transition", 5, 30, 0, "°"),
+        ("blur strength", "strength", 0.3, 1, 2, ""),
+    ]
+
     init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 360, height: 140), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 380, height: 460), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         title = "ShyFoss"
         isReleasedWhenClosed = false
-        let grid = NSGridView(views: [
-            row("comfort zone", key: "comfort", min: 2, max: 30, digits: 0, unit: "°"),
-            row("fade distance", key: "transition", min: 5, max: 30, digits: 0, unit: "°"),
-            row("blur strength", key: "strength", min: 0.3, max: 1, digits: 2, unit: ""),
-        ])
+        let grid = NSGridView(views: specs.map(row))
         grid.column(at: 0).xPlacement = .trailing
         grid.rowSpacing = 12
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        contentView!.addSubview(grid)
+        screenList.orientation = .vertical
+        screenList.alignment = .leading
+        reloadScreens()
+        let add = NSButton(title: "add a screen where i'm looking now", target: self, action: #selector(addScreen))
+        let stack = NSStackView(views: [zone, grid, screenList, add])
+        stack.orientation = .vertical
+        stack.spacing = 20
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        contentView!.addSubview(stack)
         NSLayoutConstraint.activate([
-            grid.centerXAnchor.constraint(equalTo: contentView!.centerXAnchor),
-            grid.centerYAnchor.constraint(equalTo: contentView!.centerYAnchor),
+            stack.centerXAnchor.constraint(equalTo: contentView!.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: contentView!.centerYAnchor),
         ])
         center()
     }
 
-    func row(_ title: String, key: String, min: Double, max: Double, digits: Int, unit: String) -> [NSView] {
-        let slider = NSSlider(value: 0, minValue: min, maxValue: max, target: nil, action: nil)
+    func row(_ s: (String, String, Double, Double, Int, String)) -> [NSView] {
+        let (title, key, lo, hi, digits, unit) = s
+        let slider = NSSlider(value: defaults.double(forKey: key), minValue: lo, maxValue: hi, target: self, action: #selector(changed(_:)))
+        slider.identifier = NSUserInterfaceItemIdentifier(key)
         slider.widthAnchor.constraint(equalToConstant: 160).isActive = true
         slider.isContinuous = true
-        slider.bind(.value, to: prefs, withKeyPath: "values.\(key)")
-        let value = NSTextField(labelWithString: "")
-        value.widthAnchor.constraint(equalToConstant: 44).isActive = true
         let f = NumberFormatter()
         f.maximumFractionDigits = digits
         f.positiveSuffix = unit
+        let value = NSTextField(labelWithString: f.string(from: defaults.double(forKey: key) as NSNumber)!)
         value.formatter = f
-        value.bind(.value, to: prefs, withKeyPath: "values.\(key)")
+        value.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        labels[key] = value
         return [NSTextField(labelWithString: title), slider, value]
+    }
+
+    func reloadScreens() {
+        screenList.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for (i, s) in screens.enumerated() {
+            let dir = abs(s.x) > abs(s.y) ? (s.x > 0 ? "right" : "left") : (s.y > 0 ? "up" : "down")
+            let label = NSTextField(labelWithString: String(format: "screen %d: %.0f° %@", i + 1, simd_length(s), dir))
+            let rm = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "remove")!, target: self, action: #selector(removeScreen(_:)))
+            rm.isBordered = false
+            rm.tag = i
+            screenList.addArrangedSubview(NSStackView(views: [label, rm]))
+        }
+        zone.needsDisplay = true
+    }
+
+    @objc func addScreen() { onAddScreen?() }
+    @objc func removeScreen(_ b: NSButton) { screens.remove(at: b.tag); reloadScreens() }
+
+    @objc func changed(_ s: NSSlider) {
+        let key = s.identifier!.rawValue
+        defaults.set(s.doubleValue, forKey: key)
+        labels[key]!.stringValue = (labels[key]!.formatter as! NumberFormatter).string(from: s.doubleValue as NSNumber)!
+        zone.needsDisplay = true
     }
 }
 
@@ -83,14 +155,14 @@ final class App: NSObject, NSApplicationDelegate, CMHeadphoneMotionManagerDelega
     let motion = CMHeadphoneMotionManager()
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var overlays: [Overlay] = []
-    var refs: [simd_quatd] = []
+    var ref: simd_quatd?
     var lastStamp = 0.0
     var lastSeen = Date.distantPast
     var escaped = false
     var stolenFrom: NSRunningApplication?
     let status = NSMenuItem(title: "no airpods", action: nil, keyEquivalent: "")
     let enabledItem = NSMenuItem(title: "enabled", action: #selector(toggle), keyEquivalent: "")
-    lazy var settings = SettingsWindow()
+    lazy var settings = { let s = SettingsWindow(); s.onAddScreen = { [unowned self] in addCenter() }; return s }()
     var enabled: Bool { defaults.bool(forKey: "enabled") }
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -121,7 +193,7 @@ final class App: NSObject, NSApplicationDelegate, CMHeadphoneMotionManagerDelega
         m.addItem(status)
         m.addItem(withTitle: "recenter", action: #selector(recenter), keyEquivalent: "r")
         m.addItem(withTitle: "calibrate…", action: #selector(calibratePrompt), keyEquivalent: "")
-        m.addItem(withTitle: "add another screen here", action: #selector(addCenter), keyEquivalent: "")
+        m.addItem(withTitle: "add a screen here", action: #selector(addCenter), keyEquivalent: "")
         enabledItem.state = enabled ? .on : .off
         m.addItem(enabledItem)
         let login = m.addItem(withTitle: "launch at login", action: #selector(toggleLogin), keyEquivalent: "")
@@ -146,13 +218,16 @@ final class App: NSObject, NSApplicationDelegate, CMHeadphoneMotionManagerDelega
         let dt = stamp - lastStamp
         lastStamp = stamp
         if !defaults.bool(forKey: "calibrated") { defaults.set(true, forKey: "calibrated"); calibratePrompt(); return }
-        guard !refs.isEmpty else { refs = [att]; return }
-        let (i, dev) = refs.enumerated().map { ($0, deviation($1, att)) }.min { $0.1 < $1.1 }!
+        guard let ref else { self.ref = att; return }
+        let raw = offset(ref, att)
+        let (i, off) = nearest(raw)
+        let dev = simd_length(off)
+        if settings.isVisible { settings.zone.head = raw }
         status.title = String(format: "off center %.0f°", dev)
         if dev < comfortDeg {
             escaped = false
             // yaw drifts without a magnetometer; follow it at 0.5°/s but only while looking at the screen
-            if dev > 0.01, dt > 0, dt < 1 { refs[i] = simd_slerp(refs[i], att, min(1, 0.5 * dt / dev)) }
+            if i == 0, dev > 0.01, dt > 0, dt < 1 { self.ref = simd_slerp(ref, att, min(1, 0.5 * dt / dev)) }
         }
         guard enabled, !escaped else { return }
         setAlpha(coverage(dev, comfort: comfortDeg, transition: transitionDeg) * strength)
@@ -174,8 +249,12 @@ final class App: NSObject, NSApplicationDelegate, CMHeadphoneMotionManagerDelega
         }
     }
 
-    @objc func recenter() { refs = []; escaped = false; setAlpha(0) }
-    @objc func addCenter() { if let cur = motion.deviceMotion { refs.append(quat(cur.attitude.quaternion)) } }
+    @objc func recenter() { ref = nil; escaped = false; setAlpha(0) }
+    @objc func addCenter() {
+        guard let ref, let cur = motion.deviceMotion else { status.title = "no airpods data yet"; return }
+        screens.append(offset(ref, quat(cur.attitude.quaternion)))
+        settings.reloadScreens()
+    }
     @objc func toggleLogin() {
         let s = SMAppService.mainApp
         do { try s.status == .enabled ? s.unregister() : s.register() } catch { status.title = error.localizedDescription }
@@ -197,7 +276,7 @@ final class App: NSObject, NSApplicationDelegate, CMHeadphoneMotionManagerDelega
         RegisterEventHotKey(UInt32(kVK_ANSI_S), mods, EventHotKeyID(signature: 0x53485946, id: 2), GetApplicationEventTarget(), 0, &ref)
     }
     @objc func toggle() { defaults.set(!enabled, forKey: "enabled"); enabledItem.state = enabled ? .on : .off; if !enabled { setAlpha(0) } }
-    @objc func showSettings() { NSApp.activate(); settings.makeKeyAndOrderFront(nil) }
+    @objc func showSettings() { NSApp.activate(); settings.zone.needsDisplay = true; settings.makeKeyAndOrderFront(nil) }
 
     @objc func calibratePrompt() {
         let a = NSAlert()
@@ -226,6 +305,12 @@ if CommandLine.arguments.contains("--selftest") {
     assert(abs(deviation(id, rot(20, SIMD3(1, 0, 0))) - 20) < 0.01)
     assert(deviation(id, rot(20, SIMD3(0, 1, 0))) < 0.01)
     assert(abs(deviation(rot(30, SIMD3(0, 0, 1)), rot(50, SIMD3(0, 0, 1))) - 20) < 0.01)
+    assert(abs(offset(id, rot(20, SIMD3(0, 0, 1))).x + 20) < 0.01)
+    assert(abs(offset(id, rot(20, SIMD3(1, 0, 0))).y - 20) < 0.01)
+    screens = [SIMD2(-30, 0)]
+    assert(nearest(SIMD2(-25, 0)).0 == 1 && abs(simd_length(nearest(SIMD2(-25, 0)).1) - 5) < 0.01)
+    assert(nearest(SIMD2(-5, 0)).0 == 0)
+    screens = []
     print("ok"); exit(0)
 }
 
