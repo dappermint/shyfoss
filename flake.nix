@@ -15,7 +15,7 @@
         let
           shyfoss = pkgs.stdenvNoCC.mkDerivation {
             pname = "shyfoss";
-            version = "0.3.0";
+            version = "0.3.1";
             src = lib.fileset.toSource {
               root = ./.;
               fileset = lib.fileset.unions [ ./main.swift ./Info.plist ];
