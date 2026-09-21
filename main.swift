@@ -311,7 +311,7 @@ final class App: NSObject, NSApplicationDelegate, CMHeadphoneMotionManagerDelega
         RegisterEventHotKey(UInt32(kVK_ANSI_S), mods, EventHotKeyID(signature: 0x53485946, id: 2), GetApplicationEventTarget(), 0, &ref)
     }
     @objc func toggle() { defaults.set(!enabled, forKey: "enabled"); enabledItem.state = enabled ? .on : .off; if !enabled { setAlpha(0) } }
-    @objc func showSettings() { NSApp.activate(); settings.zone.needsDisplay = true; settings.makeKeyAndOrderFront(nil) }
+    @objc func showSettings() { NSApp.activate(); settings.reloadScreens(); settings.makeKeyAndOrderFront(nil) }
 
     @objc func calibratePrompt() {
         let a = NSAlert()
